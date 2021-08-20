@@ -12,6 +12,7 @@ import System.FilePath.Posix
 import System.Console.GetOpt
 import Data.Time.Clock.System
 import Control.Concurrent
+import Control.Concurrent.Async
 import Control.Concurrent.MVar
 import Control.Monad
 import Data.Int
@@ -199,11 +200,12 @@ buildProject env rootPath = do
                                          , std_err = CreatePipe }
   let shouldOutput = getDelayedOutput env
   forkIO $ delay_ 1000000 $ tryPutMVar shouldOutput True
-  forkIO $ delayOutput shouldOutput hout stdout
-  forkIO $ delayOutput shouldOutput herr stderr
+  a1 <- async $ delayOutput shouldOutput hout stdout
+  a2 <- async $ delayOutput shouldOutput herr stderr
   waitForProcess handle >>= \case
     ExitFailure _ -> do
       tryPutMVar shouldOutput True
+      wait a1 >> wait a2
       error ("Build failed for project " <> rootPath)
     ExitSuccess -> do
       tryPutMVar shouldOutput False
