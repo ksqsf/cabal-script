@@ -9,6 +9,7 @@ import System.Exit
 import System.IO
 import System.Process
 import System.FilePath.Posix
+import System.Console.GetOpt
 import Data.Time.Clock.System
 import Control.Concurrent
 import Control.Concurrent.MVar
@@ -19,30 +20,59 @@ import Data.Foldable
 
 data Env = Env
   { getProgramDir :: !FilePath
-  , getCacheDir :: !FilePath
+  , getCacheDir :: FilePath
   , getDBConn :: !DB.Connection
   , getDelayedOutput :: !(MVar Bool)
   , getStaleThreshold :: !Int64
+  , getVerbose :: !Bool
   }
+
+data Flag = Verbose | Help
+  deriving (Show, Eq)
 
 main :: IO ()
 main = do
-  args <- getArgs
   home <- getEnv "HOME"
   let programDir = home </> ".cabal" </> "cabal-script"
       cacheDir = programDir </> "cache"
       dbPath = programDir </> "cache.db"
       staleThreshold = 60
+      verbose = False
   dbConn <- dbInitAndOpen dbPath
   delayedOutput <- newEmptyMVar
-  let env = Env programDir cacheDir dbConn delayedOutput staleThreshold
-  runFile env (head args)
+  let env = Env programDir cacheDir dbConn delayedOutput staleThreshold verbose
+  (env, file, args) <- processOptions env
+  whenVerbose env $ putStrLn $ "* Execute file " <> file <> " with arguments " <> show args
+  runFile env file args
+
+options :: [OptDescr Flag]
+options =
+  [ Option ['v'] ["verbose"] (NoArg Verbose) "Print verbose debug information (default: off)"
+  , Option ['h'] ["help"]    (NoArg Help)    "Print help info"
+  ]
+
+processOptions :: Env -> IO (Env, FilePath, [String])
+processOptions env = do
+  (flags, file:args, errors) <- getOpt RequireOrder options <$> getArgs
+  if null errors
+    then pure ()
+    else traverse_ (hPutStr stderr) errors >> exitFailure
+  if any (==Help) flags
+    then putStr (usageInfo "cabal-script 0.1.0.0" options) >> exitSuccess
+    else pure ()
+  return (go env flags, file, args)
+  where go env [] = env
+        go env (Verbose:flags) = go (env{ getVerbose=True }) flags
+
+whenVerbose :: Env -> IO a -> IO ()
+whenVerbose env action = if getVerbose env then void action else pure ()
 
 -- |Run a Haskell script file.
-runFile :: Env -> FilePath -> IO ()
-runFile env file = do
+runFile :: Env -> FilePath -> [String] -> IO ()
+runFile env file args = do
   contents   <- readFile file
   let hash = showDigest (sha1 (BS.fromString contents))
+  whenVerbose env $ putStrLn $ "* Source SHA1 hash = " <> hash
   binaryPath <-  lookupCache env hash >>= \case
                   Just found -> return found
                   Nothing -> do { rootDir <- createProject contents hash
@@ -50,9 +80,9 @@ runFile env file = do
                                 ; cachedBinPath <- cacheBinary env binPath hash
                                 ; forkIO $ do { dbRecordCache env hash
                                               ; deleteStaleCaches env }
-                                ; deleteProject rootDir
+                                ; deleteProject env rootDir
                                 ; return cachedBinPath }
-  _ <- execBinary binaryPath
+  execBinary env binaryPath args
   return ()
 
 -- |Try to get the path to the cached binary from the DB.  The
@@ -64,6 +94,7 @@ lookupCache env hash = do
       cachedBinPath = cacheDir </> hash
   cached <- dbCheckAndTouch env hash
   fileExists <- doesPathExist cachedBinPath
+  whenVerbose env $ putStrLn $ "* (DB cached, File exists) = " <> show (cached, fileExists)
   return $ if cached && fileExists
     then Just cachedBinPath
     else Nothing
@@ -74,7 +105,9 @@ cacheBinary env binPath hash = do
   let cacheDir = getCacheDir env
       cachedBinPath = cacheDir </> hash
   createDirectoryIfMissing True cacheDir
+  whenVerbose env $ putStrLn $ "* Copying " <> binPath <> " to " <> cachedBinPath
   copyFile binPath cachedBinPath
+  whenVerbose env $ putStrLn $ "* Stripping " <> cachedBinPath
   callProcess "strip" [cachedBinPath]
   return cachedBinPath
 
@@ -112,6 +145,7 @@ deleteStaleCaches env = do
     shouldDelete <- DB.query conn "SELECT hash FROM cache_info WHERE last_used < ?" [bound] :: IO [[String]]
     DB.execute conn "DELETE FROM cache_info WHERE last_used < ?" [bound]
     return shouldDelete
+  whenVerbose env $ putStrLn $ "* Deleting stale caches: " <> show shouldDelete
   traverse_ (\[h] -> removeFile (cacheDir </> h)) shouldDelete
 
 -- |Create a fake package, based on the script contents.
@@ -181,16 +215,16 @@ buildProject env rootPath = do
       return binaryPath
 
 -- |Recursively delete the fake package.
-deleteProject :: FilePath -> IO ()
-deleteProject = removeDirectoryRecursive
+deleteProject :: Env -> FilePath -> IO ()
+deleteProject env dir = do
+  whenVerbose env $ putStrLn $ "* Deleting project directory " <> dir
+  removeDirectoryRecursive dir
 
 -- |Execute the binary with supplied arguments.
-execBinary :: FilePath -> IO ()
-execBinary path = do
-  args   <- getArgs
-  handle <- spawnProcess path (drop 1 args)
-  _      <- waitForProcess handle
-  return ()
+execBinary :: Env -> FilePath -> [String] -> IO ()
+execBinary env path args = void $ do
+  whenVerbose env $ putStrLn $ "* Invoke binary " <> path <> " with arguments " <> show args
+  callProcess path args
 
 delay_ :: Int -> IO a -> IO ()
 delay_ timeout action = do
@@ -204,4 +238,3 @@ delayOutput flag source sink = do
   if shouldOutput
     then hGetContents source >>= hPutStr sink
     else return ()
-
