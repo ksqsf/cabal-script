@@ -75,6 +75,7 @@ cacheBinary env binPath hash = do
       cachedBinPath = cacheDir </> hash
   createDirectoryIfMissing True cacheDir
   copyFile binPath cachedBinPath
+  callProcess "strip" [cachedBinPath]
   return cachedBinPath
 
 dbInitAndOpen :: FilePath -> IO DB.Connection
