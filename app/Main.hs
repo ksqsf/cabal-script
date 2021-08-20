@@ -160,9 +160,9 @@ writeSourceFile = writeFile
 buildProject :: Env -> FilePath -> IO FilePath
 buildProject env rootPath = do
   (_, Just hout, Just herr, handle) <- createProcess
-    (proc "cabal" ["build", "-O"]) { cwd = Just rootPath
-                                   , std_out = CreatePipe
-                                   , std_err = CreatePipe }
+    (proc "cabal" ["build", "-O", "-j"]) { cwd = Just rootPath
+                                         , std_out = CreatePipe
+                                         , std_err = CreatePipe }
   let shouldOutput = getDelayedOutput env
   forkIO $ delay_ 1000000 $ tryPutMVar shouldOutput True
   forkIO $ delayOutput shouldOutput hout stdout
