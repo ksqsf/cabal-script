@@ -111,7 +111,6 @@ deleteStaleCaches env = do
     shouldDelete <- DB.query conn "SELECT hash FROM cache_info WHERE last_used < ?" [bound] :: IO [[String]]
     DB.execute conn "DELETE FROM cache_info WHERE last_used < ?" [bound]
     return shouldDelete
-  putStrLn $ show shouldDelete
   traverse_ (\[h] -> removeFile (cacheDir </> h)) shouldDelete
 
 -- |Create a fake package, based on the script contents.
